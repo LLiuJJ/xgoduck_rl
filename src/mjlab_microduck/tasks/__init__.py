@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import os
+
 from mjlab_microduck.train_hook import maybe_submit_to_hf_jobs
 
 # `train <task> ... --hf-jobs` submits to HF Jobs and exits here, before any
@@ -21,6 +25,29 @@ class MicroduckOnPolicyRunner(VelocityOnPolicyRunner):
         sym = alg.get("symmetry_cfg") if isinstance(alg, dict) else None
         if isinstance(sym, dict) and "_env" in sym:
             alg["symmetry_cfg"] = {k: v for k, v in sym.items() if k != "_env"}
+
+        # torch.compile: fuse small CUDA kernels (matmul+elu+norm) into fewer
+        # launches via the inductor backend.  For a (512,256,128) MLP the
+        # kernel-launch overhead dominates the actual compute — inductor fuses
+        # adjacent ops so the GPU sees fewer, larger kernels.  "default" mode
+        # gives kernel fusion without CUDA graphs: reduce-overhead captures
+        # graphs that replay over stateful tensors in GaussianDistribution
+        # (loc/scale set by forward(), read by get_output_log_prob()) and the
+        # replay overwrites them → "tensor output of CUDAGraphs has been
+        # overwritten" crash.  Gated on CUDA (no benefit on CPU) and
+        # TORCH_COMPILE=0 to opt out for debugging.
+        import torch
+        if torch.cuda.is_available() and os.environ.get("TORCH_COMPILE", "1") != "0":
+            # Warp/MuJoCo-Warp cuBLAS init sets the LEGACY TF32 flag
+            # (torch.backends.cublas.allow_tf32), which makes the inductor
+            # pattern-matcher crash with "mix of legacy and new APIs" when it
+            # reads torch.backends.cuda.matmul.allow_tf32.  Explicitly align
+            # both flags to True (TF32 ON for Ampere+) before compile.
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            self.alg.actor = torch.compile(self.alg.actor, mode="default")
+            self.alg.critic = torch.compile(self.alg.critic, mode="default")
+            print("[torch.compile] actor + critic compiled (mode=default)")
 
 
 from .microduck_velocity_env_cfg import (
@@ -694,3 +721,4 @@ from mjlab_microduck.play_hook import maybe_inject_latest_checkpoint
 # After all task ids are registered: `play TASK` with no checkpoint flag
 # picks the latest local model_*.pt. Explicit wandb/file flags still win.
 maybe_inject_latest_checkpoint()
+

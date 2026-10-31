@@ -324,6 +324,8 @@ def submit(argv: list[str]) -> int:
         "MICRODUCK_IN_HF_JOB": "1",
         "CKPT_REPO": ckpt_repo,
         "TRAIN_ARGS": " ".join(shlex.quote(a) for a in [args.task, *train_args]),
+        # Reduce GPU memory fragmentation via expandable segments (PyTorch 2.1+).
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     }
     secrets: dict[str, str] = {"HF_TOKEN": token}
 
@@ -481,3 +483,4 @@ def submit(argv: list[str]) -> int:
     except KeyboardInterrupt:
         print(f"\n[job] detached. Job {job.id} is still running: {getattr(job, 'url', job.id)}")
         return 0
+
